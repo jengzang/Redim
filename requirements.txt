@@ -1,0 +1,4 @@
+# Install a CUDA-compatible torch/torchaudio pair separately, then install
+# the pinned WeSpeaker requirements after running bootstrap.
+pytest>=8.0
+PyYAML>=6.0

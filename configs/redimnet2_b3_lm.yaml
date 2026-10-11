@@ -1,3 +1,6 @@
+# Project-maintained LM recipe, derived from the ReDimNet2 paper and the
+# pinned WeSpeaker configuration contract. Runtime overrides are written to
+# exp/.../runtime_config.yaml, leaving this reproducibility baseline unchanged.
 exp_dir: exp/redimnet2_b3/lm
 gpus: "[0]"
 num_avg: 1

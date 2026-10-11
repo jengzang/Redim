@@ -1,4 +1,9 @@
-"""Validate Kaldi-style VoxCeleb manifests before launching training."""
+"""Validate project-generated manifests before a costly WeSpeaker launch.
+
+These checks are intentionally dependency-light: they catch inconsistent
+indexes, trials and JSON-lines lists before a GPU job imports WeSpeaker or
+starts distributed workers.
+"""
 
 from __future__ import annotations
 
@@ -106,6 +111,8 @@ def _validate_raw_list(
     wavs: Dict[str, str],
     speakers: Dict[str, str],
 ) -> int:
+    """Verify that a WeSpeaker raw-list row mirrors ``wav.scp``/``utt2spk``."""
+
     if not path.is_file():
         raise ManifestError(f"missing raw list: {path}")
     seen: set[str] = set()
@@ -179,7 +186,11 @@ def validate_voxceleb_layout(root: Path | str, *, check_files: bool = False) -> 
 def validate_server_vox2_layout(
     root: Path | str, *, check_files: bool = False
 ) -> dict:
-    """Validate the prepared ``vox2_dev``/``vox2_test`` server data layout."""
+    """Validate the project-specific server layout and fixed validation trials.
+
+    Unlike :func:`validate_voxceleb_layout`, this path has no VoxCeleb1 data:
+    it validates the prepared VoxCeleb2 test split used for model selection.
+    """
 
     root = Path(root).expanduser().resolve()
     if not root.is_dir():

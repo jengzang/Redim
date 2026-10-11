@@ -1,4 +1,5 @@
 import json
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,3 +117,32 @@ class ServerVox2IndexTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ServerIndexError, "expected dev/audio"):
                 prepare_server_vox2(root, Path(tmp) / "prepared")
+
+    def test_nontarget_sampling_uses_indexed_candidate_space_without_materializing_it(self):
+        """A full Vox2-test cross-speaker product must never be built in memory."""
+
+        from redim_repro.vox2_index import _sample_nontarget_pairs
+
+        class VirtualUtterances:
+            def __len__(self):
+                return 1_000_000_000
+
+            def __getitem__(self, index):
+                if not 0 <= index < len(self):
+                    raise IndexError(index)
+                return f"other/{index:09d}"
+
+            def __iter__(self):
+                raise AssertionError("sampling must not enumerate all candidates")
+
+        pairs = _sample_nontarget_pairs(
+            ["speaker/00000"],
+            VirtualUtterances(),
+            count=3,
+            rng=random.Random(17),
+            used_pairs=set(),
+        )
+
+        self.assertEqual(len(pairs), 3)
+        self.assertEqual(len(set(pairs)), 3)
+        self.assertTrue(all("speaker/00000" in pair for pair in pairs))

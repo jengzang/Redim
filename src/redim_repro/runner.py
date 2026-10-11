@@ -1,4 +1,9 @@
-"""Command construction shared by the reproduction CLI and its tests."""
+"""Project-owned command and configuration glue around a pinned WeSpeaker.
+
+No model code is vendored here.  These helpers only turn this repository's
+experiment choices into commands for WeSpeaker's public scripts, keeping those
+commands testable without GPUs or an installed WeSpeaker checkout.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,8 @@ import sys
 from typing import Sequence, Union
 
 
+# The bootstrap script uses this exact public upstream revision; pinning it
+# prevents a future WeSpeaker change from silently changing this reproduction.
 WESPEAKER_REPO = "https://github.com/wenet-e2e/wespeaker.git"
 WESPEAKER_COMMIT = "9fecd6cb4f47475d01761d87c826298dff4ef18c"
 GpuValue = Union[str, int, Sequence[Union[str, int]]]
@@ -212,7 +219,12 @@ def build_epoch_train_command(
     host_node_addr: str = "localhost:29400",
     job_id: str | int = "redimnet2",
 ) -> list[str]:
-    """Build the local torchrun command with rank-0 epoch validation."""
+    """Build this project's ``torchrun`` command with rank-0 epoch validation.
+
+    This differs from the stock upstream ``run.sh`` only where the server
+    index layout requires it: it invokes our small entrypoint so validation can
+    happen between epochs on the fixed VoxCeleb2-test trials.
+    """
 
     if num_nodes < 1:
         raise ValueError("num_nodes must be positive")

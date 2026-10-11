@@ -1,11 +1,17 @@
-"""Prepare WeSpeaker manifests from the server-provided VoxCeleb2 indexes."""
+"""Turn the server's authoritative VoxCeleb2 indexes into WeSpeaker inputs.
+
+This is project-owned glue code; it deliberately does not import WeSpeaker.
+The server's ``*.spk2utt`` files have one ``speaker relative/wav/path`` pair per
+line (rather than Kaldi's usual one-speaker-per-line form).  Reading those
+indexes, instead of recursively walking the corpus, makes the exact training
+and validation population reproducible.
+"""
 
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
 from hashlib import sha256
-import itertools
 import json
 from pathlib import Path, PurePosixPath
 import random
@@ -59,7 +65,12 @@ def read_server_index(
     *,
     check_files: bool = False,
 ) -> list[IndexRecord]:
-    """Read a two-column ``<speaker> <relative-wav-path>`` server index."""
+    """Read one source index and convert paths to stable utterance identifiers.
+
+    For example, ``test/audio/id04627/video/00022.wav`` becomes
+    ``id04627/video/00022``.  That identifier is shared by ``wav.scp``,
+    ``raw.list`` and trials, so all later stages address the same utterance.
+    """
 
     if split not in {"dev", "test"}:
         raise ValueError(f"unsupported VoxCeleb2 split: {split!r}")
@@ -119,6 +130,8 @@ def _write_lines(path: Path, lines: Iterable[str]) -> None:
 
 
 def _write_manifests(records: Sequence[IndexRecord], dataset_dir: Path) -> None:
+    """Write both Kaldi manifests and WeSpeaker's JSON-lines raw input list."""
+
     by_speaker: dict[str, list[str]] = defaultdict(list)
     for record in records:
         by_speaker[record.speaker].append(record.utt_id)
@@ -154,26 +167,88 @@ def _write_manifests(records: Sequence[IndexRecord], dataset_dir: Path) -> None:
     )
 
 
-def _take_pairs(
-    candidates: Sequence[tuple[str, str]],
+def _target_pair_at(utterances: Sequence[str], index: int) -> tuple[str, str]:
+    """Map one index in ``range(n choose 2)`` to its utterance pair."""
+
+    for left_index in range(len(utterances) - 1):
+        row_size = len(utterances) - left_index - 1
+        if index < row_size:
+            return utterances[left_index], utterances[left_index + index + 1]
+        index -= row_size
+    raise IndexError("target pair index is outside the combination space")
+
+
+def _sample_target_pairs(
+    utterances: Sequence[str], count: int, rng: random.Random
+) -> list[tuple[str, str]]:
+    """Sample target pairs by combination index without building ``n choose 2`` tuples."""
+
+    candidate_count = len(utterances) * (len(utterances) - 1) // 2
+    if candidate_count < count:
+        raise ServerIndexError(
+            f"cannot create {count} target trials from {candidate_count} unique pairs"
+        )
+    return [
+        _target_pair_at(utterances, index)
+        for index in rng.sample(range(candidate_count), count)
+    ]
+
+
+def _sample_nontarget_pairs(
+    enroll_utterances: Sequence[str],
+    other_utterances: Sequence[str],
+    *,
     count: int,
     rng: random.Random,
     used_pairs: set[tuple[str, str]],
 ) -> list[tuple[str, str]]:
-    available = [pair for pair in candidates if pair not in used_pairs]
-    if len(available) < count:
+    """Sample cross-speaker pairs by index instead of materializing a product.
+
+    A complete VoxCeleb2-test Cartesian product is much too large to hold in
+    memory.  Each candidate rank maps directly to one ``enroll × other`` pair,
+    so this function retains only the requested trials and their small set of
+    sampled ranks.  ``used_pairs`` prevents a later speaker from adding the
+    same unordered cross-speaker pair in reverse order.
+    """
+
+    other_count = len(other_utterances)
+    candidate_count = len(enroll_utterances) * other_count
+    if candidate_count < count:
         raise ServerIndexError(
-            f"cannot create {count} unique fixed trials from {len(available)} candidates"
+            f"cannot create {count} nontarget trials from {candidate_count} candidates"
         )
-    selected = rng.sample(available, count)
-    used_pairs.update(selected)
+
+    sampled_ranks: set[int] = set()
+    selected: list[tuple[str, str]] = []
+    while len(selected) < count and len(sampled_ranks) < candidate_count:
+        rank = rng.randrange(candidate_count)
+        if rank in sampled_ranks:
+            continue
+        sampled_ranks.add(rank)
+        enroll = enroll_utterances[rank // other_count]
+        verify = other_utterances[rank % other_count]
+        pair = tuple(sorted((enroll, verify)))
+        if pair in used_pairs:
+            continue
+        used_pairs.add(pair)
+        selected.append(pair)
+
+    if len(selected) != count:
+        raise ServerIndexError(
+            f"cannot create {count} unique nontarget trials from {candidate_count} candidates"
+        )
     return selected
 
 
 def build_fixed_trials(
     records: Sequence[IndexRecord], *, pairs_per_speaker: int, seed: int
 ) -> list[Trial]:
-    """Build balanced, deterministic target/nontarget trials from test records."""
+    """Build balanced, deterministic target/nontarget trials from test records.
+
+    Each test speaker contributes ``pairs_per_speaker`` same-speaker pairs and
+    the same number of cross-speaker pairs.  Keeping a seed and sorting the
+    result means an EER from one epoch is comparable with every later epoch.
+    """
 
     if pairs_per_speaker < 1:
         raise ValueError("pairs_per_speaker must be positive")
@@ -187,15 +262,11 @@ def build_fixed_trials(
         utterances.sort()
 
     rng = random.Random(seed)
-    used_targets: set[tuple[str, str]] = set()
     used_nontargets: set[tuple[str, str]] = set()
     trials: list[Trial] = []
     for speaker in speakers:
         utterances = by_speaker[speaker]
-        target_candidates = list(itertools.combinations(utterances, 2))
-        selected_targets = _take_pairs(
-            target_candidates, pairs_per_speaker, rng, used_targets
-        )
+        selected_targets = _sample_target_pairs(utterances, pairs_per_speaker, rng)
         trials.extend(Trial(enroll, verify, "target") for enroll, verify in selected_targets)
 
         other_utterances = [
@@ -204,15 +275,12 @@ def build_fixed_trials(
             if other_speaker != speaker
             for utterance in by_speaker[other_speaker]
         ]
-        nontarget_candidates = sorted(
-            {
-                tuple(sorted((enroll, verify)))
-                for enroll in utterances
-                for verify in other_utterances
-            }
-        )
-        selected_nontargets = _take_pairs(
-            nontarget_candidates, pairs_per_speaker, rng, used_nontargets
+        selected_nontargets = _sample_nontarget_pairs(
+            utterances,
+            other_utterances,
+            count=pairs_per_speaker,
+            rng=rng,
+            used_pairs=used_nontargets,
         )
         trials.extend(
             Trial(enroll, verify, "nontarget")
@@ -233,7 +301,13 @@ def prepare_server_vox2(
     seed: int = 42,
     check_files: bool = False,
 ) -> dict:
-    """Materialize WeSpeaker data files from server VoxCeleb2 dev/test indexes."""
+    """Materialize train/validation inputs without scanning the audio tree.
+
+    ``dev.spk2utt`` is the training source.  ``test.spk2utt`` becomes a fixed
+    validation population and trial list, not an official VoxCeleb1 benchmark.
+    The JSON sidecar records index checksums and sampling settings so a server
+    run remains traceable even if the corpus changes later.
+    """
 
     corpus_root = Path(corpus_root).expanduser().resolve()
     output_root = Path(output_root).expanduser().resolve()

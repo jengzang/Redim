@@ -1,4 +1,10 @@
-"""In-memory VoxCeleb2 validation used between WeSpeaker training epochs."""
+"""Project-owned fixed-trial validation between WeSpeaker training epochs.
+
+The model and dataset machinery remain in the pinned WeSpeaker dependency.
+This module adds the experiment policy missing from its stock recipe: score a
+stable VoxCeleb2-test trial set at epoch boundaries and retain the checkpoint
+with the best validation EER.
+"""
 
 from __future__ import annotations
 
@@ -90,6 +96,8 @@ def _fallback_metrics(scores: Sequence[float], labels: Sequence[bool]) -> tuple[
 
 
 def _metrics(scores: Sequence[float], labels: Sequence[bool]) -> tuple[float, float]:
+    """Use WeSpeaker's metric implementation when installed; keep a test fallback."""
+
     try:
         import numpy as np
         from wespeaker.utils.score_metrics import (
@@ -134,7 +142,12 @@ def score_trials(
 
 
 def disable_distributed_partition(dataset) -> None:
-    """Make a rank-0-only evaluation iterator cover every indexed utterance."""
+    """Make a rank-0-only evaluation iterator cover every indexed utterance.
+
+    WeSpeaker's ``DataList`` normally partitions samples by DDP rank.  Only
+    rank 0 evaluates here, so leaving that partition enabled would silently
+    embed only one worker's fraction of test utterances and invalidate trials.
+    """
 
     node = dataset
     while node is not None:
@@ -157,7 +170,12 @@ def evaluate_in_memory_model(
     *,
     num_workers: int = 1,
 ) -> EvaluationResult:
-    """Extract full-utterance embeddings with the live training model once."""
+    """Extract full-utterance embeddings with the live WeSpeaker model once.
+
+    Augmentation and random cropping are disabled for validation.  The caller
+    runs this only on rank 0, while all other ranks wait at barriers in the
+    training entrypoint before collective training resumes.
+    """
 
     try:
         import torch
@@ -239,6 +257,8 @@ def is_better(candidate: Mapping[str, float], current: Mapping[str, float]) -> b
 
 
 def _replace_best_symlink(checkpoint_path: Path, destination: Path) -> None:
+    """Atomically replace the stable best-model link after a successful epoch."""
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.tmp")
     if temporary.exists() or temporary.is_symlink():
@@ -254,7 +274,11 @@ def write_epoch_result(
     result: EvaluationResult,
     checkpoint_path: Path | str,
 ) -> dict:
-    """Persist an epoch result and atomically update the best checkpoint link."""
+    """Persist one result and update ``best_model.pt`` using EER then minDCF.
+
+    The link is outside ``models/`` so WeSpeaker's upstream checkpoint-averager
+    cannot mistake it for another epoch checkpoint.
+    """
 
     if epoch < 1:
         raise ValueError("epoch must be positive")

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# This script downloads no project code.  It obtains the external WeSpeaker
+# framework at one immutable commit; .deps/ is ignored by Git on purpose.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

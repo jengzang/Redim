@@ -2,6 +2,24 @@
 
 这个目录用 VoxCeleb2-dev 训练 WeSpeaker 的 ReDimNet2。服务器工作流直接读取已有的 `dev.spk2utt` / `test.spk2utt` 索引：dev 用于训练，test 自动生成固定验证 pairs，并在每个 epoch 计算 EER/minDCF。模型主体和训练超参数来自固定版本的上游 WeSpeaker；本项目负责索引转换、DDP 启动和逐 epoch 评测。
 
+## 代码归属与依赖边界
+
+仓库是一个**面向服务器数据布局的复现实验封装**，不是 WeSpeaker 或 ReDimNet2 模型的再实现。答辩时可以按下表说明代码来源：
+
+| 内容 | 归属/作用 |
+|---|---|
+| `src/redim_repro/vox2_index.py` | 本项目实现：把服务器的两列 `dev.spk2utt` / `test.spk2utt` 转为 Kaldi manifest、WeSpeaker `raw.list`，并从 test 索引确定性生成固定验证 trial。 |
+| `src/redim_repro/data_validation.py` | 本项目实现：在训练前校验 manifest、raw list、trial 与音频路径的一致性。 |
+| `src/redim_repro/epoch_eval.py` | 本项目实现：固定 trial 的 raw-cosine EER/minDCF、rank-0 全量验证、指标落盘和最优 checkpoint 链接。安装 WeSpeaker 后，指标计算会调用其公开的 `score_metrics` 工具。 |
+| `src/redim_repro/runner.py`、`scripts/run_experiment.py` | 本项目实现：组织数据准备、单/多机 `torchrun`、PTN/LM checkpoint 衔接、评测与上游命令调用。 |
+| `scripts/train_with_epoch_eval.py` | 本项目实现的训练入口：复用 WeSpeaker 的公开 `Dataset`、模型、优化器调度、`run_epoch`、checkpoint API；额外加入 rank-0 的逐 epoch 固定 trial 验证和 DDP 同步。 |
+| `configs/` | 本项目维护的 ReDimNet2 B3/B6 PTN/LM 实验 recipe：参数依据 ReDimNet2 论文与固定版 WeSpeaker 的可执行配置整理，不是复制进仓库的上游配置文件。 |
+| `tests/` | 本项目实现的无 GPU 单元测试，覆盖索引转换、trial 生成、验证、命令构造和最优模型选择。 |
+| `.deps/wespeaker/` | **第三方依赖，不提交。** `bootstrap_wespeaker.sh` 从 [WeSpeaker](https://github.com/wenet-e2e/wespeaker) 拉取并固定到 commit `9fecd6cb4f47475d01761d87c826298dff4ef18c`；其中提供 ReDimNet2 模型、特征前端、数据集、训练 epoch、打分工具等核心框架能力。 |
+| `reference/` | 学长提供的两篇论文，仅作为实验设计与结果对照的参考资料，不参与运行时训练。 |
+
+因此，汇报时应说“**基于 WeSpeaker 的 ReDimNet2 复现封装**”，而不是声称自行实现了 ReDimNet2 网络或 WeSpeaker 训练框架。
+
 ## 1. 环境
 
 需要 Python 3.9+、Git、ffmpeg、unzip、wget，以及与本机 CUDA 匹配的 PyTorch/torchaudio。先安装 PyTorch，再执行：
@@ -37,7 +55,7 @@ vox2_id04627 test/audio/id04627/9iu-egicBNg/00022.wav
 
 第一列是说话人标签，第二列是相对 corpus root 的音频路径。它们不是传统 Kaldi 的“一个 speaker 后跟多个 utterance”的单行格式，但完全可以作为权威索引：本项目不递归扫描百万音频，而是从这两个文件生成标准 `wav.scp`、`utt2spk`、`spk2utt` 和 `raw.list`。
 
-`test.spk2utt` 还会生成固定的平衡验证 trial 文件。默认每个 test speaker 抽取 300 个同人 target 和 300 个跨人 nontarget pair，种子固定为 42；全程都使用同一份 trial，因而每个 epoch 的 EER 可以比较。它是用于选模型的 validation set；若要报告严格最终结果，应另保留从未参与选 epoch 的评测集。
+`test.spk2utt` 还会生成固定的平衡验证 trial 文件。默认每个 test speaker 抽取 300 个同人 target 和 300 个跨人 nontarget pair，种子固定为 42；全程都使用同一份 trial，因而每个 epoch 的 EER 可以比较。所有 test 语音仍会在每次验证时提取 embedding；300 只限制最终参与打分的 pair 数，不会丢弃任何 test 语音。它是用于选模型的 validation set；若要报告严格最终结果，应另保留从未参与选 epoch 的评测集。
 
 先准备一次索引。`--check-files` 会逐条检查服务器音频是否存在，网络文件系统上可能需要几分钟：
 

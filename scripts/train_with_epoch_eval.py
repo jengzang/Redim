@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Pinned-WeSpeaker DDP training with rank-0 fixed-trial epoch evaluation."""
+"""Project-owned DDP entrypoint composed from pinned WeSpeaker public APIs.
+
+WeSpeaker supplies ``Dataset``, ReDimNet2, projection/loss construction,
+``run_epoch`` and checkpoint utilities.  This entrypoint keeps the same
+training contract while adding a rank-0-only, full-coverage fixed-trial
+validation step after selected epochs.  It is not a vendored copy of the
+WeSpeaker source tree.
+"""
 
 from __future__ import annotations
 
@@ -198,6 +205,8 @@ def train(
         start_epoch = 1
     logger.info("start_epoch: %d", start_epoch)
 
+    # Training uses DDP, but validation below deliberately receives the bare
+    # model so its frontend and embeddings can be evaluated on rank 0.
     model.cuda()
     ddp_model = torch.nn.parallel.DistributedDataParallel(model)
     device = torch.device("cuda")
@@ -261,6 +270,8 @@ def train(
         checkpoint_path = model_dir / f"model_{epoch}.pt"
         if rank == 0 and save_this_epoch:
             save_checkpoint(model, str(checkpoint_path))
+        # Every rank must observe the completed checkpoint decision before the
+        # rank-0-only forward pass; otherwise the next DDP collective can hang.
         dist.barrier(device_ids=[gpu])
         if rank == 0 and evaluate_this_epoch:
             result = evaluate_in_memory_model(
@@ -285,6 +296,7 @@ def train(
                 result.elapsed_seconds,
                 best["epoch"],
             )
+        # Non-zero ranks wait while rank 0 embeds the complete validation set.
         dist.barrier(device_ids=[gpu])
 
     if rank == 0:

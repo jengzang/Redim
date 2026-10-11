@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Bootstrap and run the pinned WeSpeaker VoxCeleb2 reproduction recipe."""
+"""Project CLI that prepares server indexes and invokes pinned WeSpeaker.
+
+This file owns orchestration and safety checks only.  ReDimNet2 construction,
+data loading, optimisation, embedding extraction and standard score tools come
+from the external WeSpeaker checkout resolved through ``WESPEAKER_DIR``.
+"""
 
 from __future__ import annotations
 
@@ -137,6 +142,8 @@ def _run(
 
 
 def ensure_upstream() -> Path:
+    """Fetch/verify the pinned third-party WeSpeaker checkout when requested."""
+
     bootstrap = ROOT / "scripts" / "bootstrap_wespeaker.sh"
     _run(["bash", str(bootstrap)])
     upstream = _upstream_dir()
@@ -275,6 +282,8 @@ def command_prepare(args: argparse.Namespace) -> int:
 
 
 def command_prepare_server_vox2(args: argparse.Namespace) -> int:
+    """Convert index files first, then delegate optional shard writing upstream."""
+
     corpus = args.corpus.expanduser().resolve()
     data = args.data.expanduser().resolve()
     report = prepare_server_vox2(
@@ -338,6 +347,8 @@ def command_train(args: argparse.Namespace) -> int:
     )
     num_avg = args.num_avg if args.num_avg is not None else default_num_avg(args.phase)
     if args.server_vox2:
+        # The project-specific path uses raw or shard manifests generated from
+        # server indexes and our entrypoint for epoch-level Vox2-test validation.
         reverb_data, noise_data = _server_augmentation_paths(args, data)
         _require_server_vox2_training_data(
             data,
@@ -397,6 +408,8 @@ def command_train(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # The legacy VoxCeleb1 path below stays delegated to WeSpeaker's official
+    # recipe and is only retained for paper-protocol final evaluation.
     checkpoint = None
     if args.phase == "lm":
         _require_converted_data(
